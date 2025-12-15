@@ -23,6 +23,30 @@ function _get_sos_value(
     return SOSStatusVariable.NO_VARIABLE
 end
 
+# Helper to fetch derate fraction from ActivePowerTimeSeriesParameter, returns 1.0 if not present
+function _derate_factor_pwl(container::OptimizationContainer, ::Type{V}, dev, t) where {V <: PSY.Component}
+    has_container_key(container, ActivePowerTimeSeriesParameter, V) || return 1.0
+
+    pc = get_parameter(container, ActivePowerTimeSeriesParameter(), V)
+    attr = pc.attributes
+    name_key = PSY.get_name(dev)
+
+    ts_uuid = get(attr.component_name_to_ts_uuid, name_key, nothing)
+    ts_uuid === nothing && return 1.0
+
+    # Check if this UUID is actually in the multiplier_array (device might not have max_active_power time series)
+    ts_uuid in axes(pc.multiplier_array, 1) || return 1.0
+
+    # Get the multiplier value which equals time_series_data * base_multiplier
+    # For ActivePowerTimeSeriesParameter, base_multiplier is Pmax
+    # So multiplier_array[ts_uuid, t] = derate_fraction * Pmax
+    # We need just the derate_fraction
+    pmax = PSY.get_active_power_limits(dev).max
+    derated_value = pc.multiplier_array[ts_uuid, t]
+
+    return derated_value / pmax
+end
+
 ##################################################
 ################# PWL Variables ##################
 ##################################################
@@ -381,10 +405,12 @@ function _add_pwl_term!(
     pwl_cost_expressions = Vector{JuMP.AffExpr}(undef, time_steps[end])
     sos_val = _get_sos_value(container, V, component)
     for t in time_steps
+        derate_t = _derate_factor_pwl(container, T, component, t)
+        scaled_break_points = break_points .* derate_t
         _add_pwl_variables!(container, T, name, t, data)
-        _add_pwl_constraint!(container, component, U(), break_points, sos_val, t)
+        _add_pwl_constraint!(container, component, U(), scaled_break_points, sos_val, t)
         if !cost_is_convex
-            _add_pwl_sos_constraint!(container, component, U(), break_points, sos_val, t)
+            _add_pwl_sos_constraint!(container, component, U(), scaled_break_points, sos_val, t)
         end
         pwl_cost =
             _get_pwl_cost_expression(container, component, t, cost_function, U(), V())
@@ -459,8 +485,10 @@ function _add_pwl_term!(
     temp_cost_function =
         create_temporary_cost_function_in_system_per_unit(cost_function, data)
     for t in time_steps
+        derate_t = _derate_factor_pwl(container, T, component, t)
+        scaled_break_points = break_points .* derate_t
         _add_pwl_variables!(container, T, name, t, data)
-        _add_pwl_constraint!(container, component, U(), break_points, sos_val, t)
+        _add_pwl_constraint!(container, component, U(), scaled_break_points, sos_val, t)
         pwl_cost =
             _get_pwl_cost_expression(container, component, t, temp_cost_function, U(), V())
         pwl_cost_expressions[t] = pwl_cost

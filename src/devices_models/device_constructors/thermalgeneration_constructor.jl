@@ -784,6 +784,10 @@ function construct_device!(
 
     initial_conditions!(container, devices, ThermalStandardDispatch())
 
+    if haskey(get_time_series_names(device_model), ActivePowerTimeSeriesParameter)
+        add_parameters!(container, ActivePowerTimeSeriesParameter, devices, device_model)
+    end
+
     _handle_common_thermal_parameters!(container, devices, device_model)
 
     add_to_expression!(
@@ -871,6 +875,18 @@ function construct_device!(
     )
 
     add_constraints!(container, RampConstraint, devices, device_model, network_model)
+
+    # Add derate constraint if derates exist
+    if haskey(get_time_series_names(device_model), ActivePowerTimeSeriesParameter)
+        add_constraints!(
+            container,
+            ActivePowerVariableTimeSeriesLimitsConstraint,
+            ActivePowerVariable,
+            devices,
+            device_model,
+            network_model,
+        )
+    end
 
     add_feedforward_constraints!(container, device_model, devices)
 

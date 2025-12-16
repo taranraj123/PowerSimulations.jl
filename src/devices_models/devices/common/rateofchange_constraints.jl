@@ -268,10 +268,11 @@ function add_linear_ramp_constraints!(
         ramp_limits = PSY.get_ramp_limits(dev)
         power_limits = PSY.get_active_power_limits(dev)
 
-        # --- t = 1: initial ramp constraints disabled for debugging
+        # --- t = 1: Use ic_power to determine starting ramp condition
         ic_idx = findfirst(ic -> get_component_name(ic) == name, initial_conditions_power)
         ic_power = get_value(initial_conditions_power[ic_idx])
-        ycur = on_status[name, 1]
+        # Must-run units don't have OnStatusParameter (always on)
+        ycur = PSY.get_must_run(dev) ? 1.0 : on_status[name, 1]
         sl_ub, sl_lb = _get_ramp_slack_vars(container, model, name, 1)
 
         # Ramp UP from IC
@@ -280,7 +281,7 @@ function add_linear_ramp_constraints!(
             ramp_limits.up * minutes_per_period + power_limits.max * (1 - ycur)
         )
 
-        # Ramp DOWN from IC
+        # Ramp DOWN from IC  
         con_down[name, 1] = JuMP.@constraint(jump_model,
             ic_power - variable[name, 1] - sl_lb <=
             ramp_limits.down * minutes_per_period + power_limits.max * (1 - ycur)
@@ -288,8 +289,10 @@ function add_linear_ramp_constraints!(
 
         # --- t ≥ 2: gate by previous status y_{t-1}
         for t in time_steps[2:end]
-            yprev = on_status[name, t - 1]   # 0/1 fixed from UC
-            ycur = on_status[name, t]       # 0/1 fixed from UC
+            # Must-run units don't have OnStatusParameter (always on)
+            is_must_run = PSY.get_must_run(dev)
+            yprev = is_must_run ? 1.0 : on_status[name, t - 1]
+            ycur = is_must_run ? 1.0 : on_status[name, t]
             sl_ub, sl_lb = _get_ramp_slack_vars(container, model, name, t)
 
             # Ramp UP when already ON previously
@@ -301,7 +304,8 @@ function add_linear_ramp_constraints!(
             # Ramp DOWN when already ON previously
             con_down[name, t] = JuMP.@constraint(jump_model,
                 variable[name, t - 1] - variable[name, t] - sl_lb <=
-                ramp_limits.down * minutes_per_period + power_limits.max * (2 - yprev - ycur)
+                ramp_limits.down * minutes_per_period +
+                power_limits.max * (2 - yprev - ycur)
             )
         end
     end

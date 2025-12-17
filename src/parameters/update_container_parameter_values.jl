@@ -393,6 +393,89 @@ function _update_parameter_values!(
     return
 end
 
+# More specific method for AvailableStatusParameter - reads from time series on supplemental attributes
+function _update_parameter_values!(
+    parameter_array::AbstractArray{T},
+    attributes::EventParametersAttributes{W, AvailableStatusParameter},
+    ::Type{V},
+    model::DecisionModel,
+    ::DatasetContainer{InMemoryDataset},
+) where {
+    T <: Union{JuMP.VariableRef, Float64},
+    W <: PSY.Outage,
+    V <: PSY.Component,
+}
+    initial_forecast_time = get_current_time(model)
+    horizon = get_time_steps(get_optimization_container(model))[end]
+
+    # Get the event model's timeseries mapping
+    # The EventModel should have configured this as Dict(:outage_status => "outage_status")
+    ts_name = "outage_status"
+
+    # Get system and find all components with the outage supplemental attribute
+    sys = get_system(model)
+    template = get_template(model)
+    device_model = get_model(template, V)
+    components = get_available_components(device_model, sys)
+
+    component_names, _ = axes(parameter_array)
+
+    for component in components
+        comp_name = PSY.get_name(component)
+
+        # Skip if not in parameter array
+        if !(comp_name in component_names)
+            continue
+        end
+
+        # Check if component has the outage supplemental attribute
+        if !PSY.has_supplemental_attributes(component, W)
+            # No outage for this component, keep parameters at 1.0 (available)
+            continue
+        end
+
+        # Get the outage supplemental attribute
+        outage_attrs = PSY.get_supplemental_attributes(W, component)
+        if isempty(outage_attrs)
+            continue
+        end
+
+        outage_attr = first(outage_attrs)
+
+        # Check if the outage attribute has the time series
+        if !PSY.has_time_series(outage_attr, PSY.SingleTimeSeries, ts_name)
+            @warn "Component $comp_name has $(W) but no time series named '$ts_name'"
+            continue
+        end
+
+        # Get time series values from the outage supplemental attribute
+        # Use PowerSystems API directly since get_time_series_values! doesn't work on supplemental attributes
+        ts = PSY.get_time_series(PSY.SingleTimeSeries, outage_attr, ts_name)
+
+        # Get the time series array for the forecast window
+        ta = PSY.get_time_series_array(outage_attr, ts; start_time = initial_forecast_time, len = horizon)
+        ts_vector = TimeSeries.values(ta)
+
+        # Update parameter values
+        # Convention: 1 = outaged (unavailable), 0 = available
+        # Parameter should be: 1 = available, 0 = outaged (unavailable)
+        # So we need to invert: param_value = 1.0 - ts_value
+        for (t, ts_value) in enumerate(ts_vector)
+            # Invert the time series value
+            param_value = 1.0 - ts_value
+
+            if !isfinite(param_value)
+                error("The value for time series $(ts_name) on $(W) for component $(comp_name) is not finite: $(ts_value)")
+            end
+
+            _set_param_value!(parameter_array, param_value, comp_name, t)
+        end
+    end
+
+    return
+end
+
+# Generic method for other EventParameters - reads from simulation state
 function _update_parameter_values!(
     parameter_array::AbstractArray{T},
     attributes::EventParametersAttributes{W, U},
